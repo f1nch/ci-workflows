@@ -1,0 +1,9 @@
+{
+  "name": "node-ci-self-test",
+  "private": true,
+  "scripts": {
+    "typecheck": "node --check index.js",
+    "test": "node --test",
+    "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true});require('fs').copyFileSync('index.js','dist/index.js')\""
+  }
+}

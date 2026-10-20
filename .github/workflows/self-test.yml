@@ -1,0 +1,19 @@
+# Runs node-ci.yml against a tiny npm app so changes to it are tested before release.
+# The fixture has no "lint" script on purpose: that exercises the skip-with-warning path.
+name: self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  npm-app:
+    uses: ./.github/workflows/node-ci.yml
+    with:
+      working-directory: test/npm-app
+      audit-level: high

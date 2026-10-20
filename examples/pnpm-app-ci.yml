@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly audit-only run, so new advisories surface without a code change.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: f1nch/ci-workflows/.github/workflows/node-ci.yml@v1
+    with:
+      audit-level: high
+      e2e-script: e2e
+      e2e-setup: pnpm --filter <your-app> exec playwright install --with-deps chromium

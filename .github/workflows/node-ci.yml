@@ -1,0 +1,171 @@
+# Reusable CI for Node/TypeScript apps (npm or pnpm).
+#
+# Runs the repo's own package.json scripts, so each app decides *how* it
+# typechecks/lints/tests/builds; this workflow only decides *that* it does:
+#   checks: frozen-lockfile install, then typecheck -> lint -> test -> build
+#   audit:  <pm> audit at the given severity
+#   e2e:    opt-in end-to-end script
+# A missing script is skipped with a warning annotation rather than failing.
+#
+# Self-contained on purpose (no local composite actions): a reusable workflow
+# resolves `./` paths against the *caller's* checkout, so helpers here would
+# break when another repo calls this file.
+#
+# Usage from another repo (see README.md for all inputs):
+#   jobs:
+#     ci:
+#       uses: f1nch/ci-workflows/.github/workflows/node-ci.yml@v1
+
+name: node-ci
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node version. Empty = read .nvmrc / .node-version, else latest LTS.
+        type: string
+        default: ''
+      working-directory:
+        description: Directory containing package.json and the lockfile.
+        type: string
+        default: '.'
+      scripts:
+        description: Space-separated package.json scripts to run, in order, in the checks job.
+        type: string
+        default: 'typecheck lint test build'
+      audit-level:
+        description: Fail on vulnerabilities at or above this severity (low|moderate|high|critical). Empty = skip audit.
+        type: string
+        default: 'high'
+      audit-prod-only:
+        description: Only audit production dependencies.
+        type: boolean
+        default: false
+      e2e-script:
+        description: package.json script for end-to-end tests. Empty = no e2e job.
+        type: string
+        default: ''
+      e2e-setup:
+        description: Command run before e2e (e.g. installing Playwright browsers).
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    # Scheduled runs exist to catch newly published advisories; skip the rest.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect package manager and Node version
+        id: setup
+        env:
+          NODE_VERSION: ${{ inputs.node-version }}
+        run: &detect |
+          if   [ -f pnpm-lock.yaml ];    then pm=pnpm; lock=pnpm-lock.yaml
+          elif [ -f package-lock.json ]; then pm=npm;  lock=package-lock.json
+          else echo "::error::No pnpm-lock.yaml or package-lock.json in $PWD"; exit 1; fi
+          v="$NODE_VERSION"
+          for f in .nvmrc .node-version; do
+            if [ -z "$v" ] && [ -f "$f" ]; then v="$(tr -d '[:space:]' < "$f")"; fi
+          done
+          echo "pm=$pm" >> "$GITHUB_OUTPUT"
+          echo "lock=$lock" >> "$GITHUB_OUTPUT"
+          echo "node-version=${v:-lts/*}" >> "$GITHUB_OUTPUT"
+      - &pnpm
+        if: steps.setup.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@v6
+        with:
+          # pnpm version comes from the "packageManager" field.
+          package_json_file: ${{ inputs.working-directory }}/package.json
+      - &node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.setup.outputs.node-version }}
+          cache: ${{ steps.setup.outputs.pm }}
+          cache-dependency-path: ${{ inputs.working-directory }}/${{ steps.setup.outputs.lock }}
+      - &install
+        name: Install (fails if the lockfile is out of date)
+        run: ${{ steps.setup.outputs.pm == 'pnpm' && 'pnpm install --frozen-lockfile' || 'npm ci' }}
+      - name: Run scripts
+        env:
+          PM: ${{ steps.setup.outputs.pm }}
+          SCRIPTS: ${{ inputs.scripts }}
+        run: |
+          for s in $SCRIPTS; do
+            if node -e "process.exit(require('./package.json').scripts?.[process.argv[1]] ? 0 : 1)" "$s"; then
+              echo "::group::$s"
+              "$PM" run "$s"
+              echo "::endgroup::"
+            else
+              echo "::warning title=Missing script::package.json has no \"$s\" script; skipped."
+            fi
+          done
+
+  audit:
+    if: inputs.audit-level != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect package manager and Node version
+        id: setup
+        env:
+          NODE_VERSION: ${{ inputs.node-version }}
+        run: *detect
+      - *pnpm
+      # No cache: nothing is installed, so the post-job cache save would fail on a missing store.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.setup.outputs.node-version }}
+      # Audits read the lockfile, so no install is needed.
+      - name: Audit dependencies
+        env:
+          PM: ${{ steps.setup.outputs.pm }}
+          LEVEL: ${{ inputs.audit-level }}
+          PROD: ${{ inputs.audit-prod-only }}
+        run: |
+          args=(audit --audit-level "$LEVEL")
+          if [ "$PROD" = "true" ]; then
+            if [ "$PM" = "npm" ]; then args+=(--omit dev); else args+=(--prod); fi
+          fi
+          "$PM" "${args[@]}"
+
+  e2e:
+    if: inputs.e2e-script != '' && github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect package manager and Node version
+        id: setup
+        env:
+          NODE_VERSION: ${{ inputs.node-version }}
+        run: *detect
+      - *pnpm
+      - *node
+      - *install
+      - name: E2E setup
+        if: inputs.e2e-setup != ''
+        run: ${{ inputs.e2e-setup }}
+      - name: E2E tests
+        env:
+          PM: ${{ steps.setup.outputs.pm }}
+          SCRIPT: ${{ inputs.e2e-script }}
+        run: '"$PM" run "$SCRIPT"'
